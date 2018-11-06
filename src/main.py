@@ -3,7 +3,6 @@ import numpy as np
 
 import config
 from octree.octree import poisson_surface_reconstruction
-from normal.normal import normal
 from utils.ply import read_ply, write_ply
 
 if __name__ == '__main__':
@@ -14,7 +13,6 @@ if __name__ == '__main__':
 
     print(points.shape)
     print(normals.shape)
-    # normals = normal(points)
     node_locs, node_grads = poisson_surface_reconstruction(config.octdepth)(points, normals)
 
     write_ply(config.outpath, (node_locs, node_grads), ['x', 'y', 'z', 'nx', 'ny', 'nz'])
