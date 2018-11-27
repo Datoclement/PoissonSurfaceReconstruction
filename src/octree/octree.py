@@ -1,4 +1,5 @@
 import numpy as np
+from tqdm import tqdm
 
 # Base Functions
 def base(vec, func):
@@ -18,6 +19,12 @@ def f3(x):
         + (-x**2. + 3./4.) * b1
     return vals
 
+def ddf3(x):
+    abx = np.abs(x)
+    b1 = abx < 0.5
+    b2 = abx < 1.5
+    return -2. * b1 + b2 * (1.-b1)
+
 octant_bits = np.array(
         [[(i&(1<<j))>0 for j in range(3)] for i in range(8)],
         dtype=int)
@@ -26,24 +33,16 @@ def test():
 
     # base function test
     import matplotlib.pyplot as plt
-    l, h = intv = (-4, +4)
+    l, h = intv = (-2, +2)
     prec = 1000
     x = np.linspace(l,h,prec*(h-l)+1)
-    plt.plot(x,f3(x),'r',label='f3')
-    plt.plot(x,f2(x),'b',label='f2')
-    plt.plot(x,f1(x),'k',label='f1')
-    y = f1(x)
-    n = 6
-    half = prec//2
-    for i in range(n):
-        plt.plot(x,y,label='true_f'+str(i+1))
-        cs = np.cumsum(y)
-        y = 1/prec*(np.concatenate([cs[half:],np.zeros(half)+cs[-1]])\
-            - np.concatenate([np.zeros(half),cs[:-half]]))
+    plt.plot(x,f1(x),'b',label='0th-order spline')
+    plt.plot(x,f2(x),'g',label='1st-order spline')
+    plt.plot(x,f3(x),'r',label='2nd-order spline')
     plt.legend()
     plt.show()
 
-def poisson_surface_reconstruction(depth):
+def poisson_surface_reconstruction(depth, tempt):
 
     num_voxels = 2**depth
 
@@ -51,8 +50,12 @@ def poisson_surface_reconstruction(depth):
 
         def init_smoothing_filter():
 
-            def smoothing_filter(x):
-                return np.prod(f3(x))
+            def smoothing_filter(scaler):
+                def scaled_filter(x):
+                    return np.prod(f3(scaler(x)))
+                def dd_scaled_filter(x):
+                    return np.prod(ddf3(scaler(x)))
+                return scaled_filter, dd_scaled_filter
 
             radius = 1.5
 
@@ -120,6 +123,7 @@ def poisson_surface_reconstruction(depth):
                     if octant not in current_node:
                         init_node(current_node)
                     current_node = current_node[octant]
+                current_node['index'] = index
                 index_to_leaf[tuple(index)] = current_node
 
             def get_surroundings(vertex):
@@ -138,68 +142,170 @@ def poisson_surface_reconstruction(depth):
                         axis=-1)
                 return trilinears
 
-            def add_point(point, normal):
+            def get_surroundings_and_trilinears(location):
                 relative_coord = min_max_normalise(point)
                 closest_vertex = get_closest_vertex(relative_coord)
                 surroundings = get_surroundings(closest_vertex)
                 trilinears = get_trilinears(relative_coord, closest_vertex)
-                for node, weight in zip(surroundings, trilinears):
+                return surroundings, trilinears
+
+            def add_point(point, normal):
+                for node, weight in zip(*get_surroundings_and_trilinears(point)):
                     node['normal'] += weight * normal
 
             for point, normal in zip(points, normals):
                 add_point(point, normal)
 
             true_radius = radius / num_voxels * size
+            def aux_range_search(node, location):
+                result = list()
+                dist = np.amax(np.abs(location - node['center']))
+                if node['depth']==depth:
+                    if dist < true_radius:
+                        result.append(node)
+                elif dist < true_radius + node['width']:
+                    for octant_bit in octant_bits:
+                        octant_bit = tuple(octant_bit)
+                        if octant_bit in node:
+                            result.extend(aux_range_search(node[octant_bit], location))
+                return result
             def range_search(location):
                 location = np.array(location)
-                def aux_range_search(node):
-                    result = list()
-                    dist = np.amax(np.abs(location - node['center']))
-                    if node['depth']==depth:
-                        if dist < true_radius:
-                            result.append(node)
-                    elif dist < true_radius + node['width']:
-                        for octant_bit in octant_bits:
-                            octant_bit = tuple(octant_bit)
-                            if octant_bit in node:
-                                result.extend(aux_range_search(node[octant_bit]))
-                    return result
-                return aux_range_search(octree)
+                return aux_range_search(octree, location)
 
-            return octree, nodes, range_search
+            fields = ['center', 'gradient', 'divergence', 'v', 'chi']
+            fields_transform = {
+                    'center':['x', 'y', 'z'],
+                    'gradient':['nx', 'ny', 'nz']
+                }
+            def octree_fields():
+                attribs = list(set(nodes[0].keys()).intersection(fields))
+                values = dict(zip(attribs, [[] for a in attribs]))
+                for node in nodes:
+                    for attrib in attribs:
+                        values[attrib].append(node[attrib])
+                for attrib in attribs:
+                    values[attrib] = np.array(values[attrib])
+                for k in fields_transform:
+                    for i, v in enumerate(fields_transform[k]):
+                        values[v] = values[k][:,i]
+                    del values[k]
+                return values
 
-        octree, nodes, range_search = build_octree()
+            def real_to_voxel_scaling(x):
+                return x/voxel_size
+
+            return octree, nodes, real_to_voxel_scaling, range_search, get_surroundings_and_trilinears, octree_fields
+
+        octree, nodes, real_to_voxel_scaling, range_search, sur_and_tril, octree_fields = build_octree()
+        filter, dd_filter = filter(real_to_voxel_scaling)
+
+        def conv_like_op():
+            neighbours = dict()
+            print('nodes len',len(nodes))
+
+            print('neighbour searching...')
+            for i, node in tqdm(enumerate(nodes)):
+                neighbours[i] = range_search(node['center'])
+
+            def iterate_over_nodes(func):
+                print('{} is being executed...'.format(func.name))
+                for i, node in tqdm(enumerate(nodes)):
+                    func(node, neighbours[i])
+            return iterate_over_nodes
+        op_executor = conv_like_op()
 
         def compute_gradient():
-            print('nodes len',len(nodes))
-            for i,node in enumerate(nodes):
-                if (i+1) % 1000 == 0:
-                    print('finished',i)
+            def f(node, neighbours):
                 node['gradient'] = np.zeros(3)
-                relevants = range_search(node['center'])
-                for relevant in relevants:
-                    # print("relevant",relevant)
-                    node['gradient'] += filter(np.array(relevant['center'])-np.array(node['center'])) * relevant['normal']
-        compute_gradient()
+                for neighbour in neighbours:
+                    node['gradient'] += filter(np.array(neighbour['center'])-np.array(node['center'])) * neighbour['normal']
+            f.name = 'gradient computation'
+            return f
+        op_executor(compute_gradient())
 
-        node_locs = list()
-        node_grads = list()
-        for node in nodes:
-            node_locs.append(node['center'])
-            node_grads.append(node['gradient'])
+        def compute_divergence():
+            def f(node, neighbours):
+                node['divergence'] = 0.
+                for neighbour in neighbours:
+                    delta = np.array(neighbour['center'])-np.array(node['center'])
+                    if (delta < 1e-10).all():
+                        continue
+                    dgrad = np.array(neighbour['gradient'])-np.array(node['gradient'])
+                    n_delta = np.sum(delta**2.)**.5
+                    node['divergence'] += filter(n_delta) * np.sum(delta * dgrad / n_delta)
+            f.name = 'divergence computation'
+            return f
+        op_executor(compute_divergence())
 
-        node_locs = np.array(node_locs)
-        node_grads = np.array(node_grads)
-        print('np.amin(node_locs,axis=0)',np.amin(node_locs,axis=0))
-        print('np.amax(node_locs,axis=0)',np.amax(node_locs,axis=0))
-        # print('node_locs[:10]',node_locs[:10])
-        print('node_grads[:10]',node_grads[:10])
-        return node_locs, node_grads
+        def project_on_kernel_space():
+            def f(node, neighbours):
+                node['v'] = 0.
+                for neighbour in neighbours:
+                    node['v'] += filter(np.array(neighbour['center'])-np.array(node['center'])) * neighbour['divergence']
+            f.name = 'projection on finite basis'
+            return f
+        op_executor(project_on_kernel_space())
+        v = np.array([ node['v'] for node in nodes ])
 
-        # compute_divergence()
-        # project_on_kernel_space()
-        # laplacian = get_laplacian_matrix()
-        # scalars = use_poisson_solver()
+        def dxxf(x, ax):
+            """
+                x is of dimension 1
+            """
+            nonax = list(range(3))
+            nonax.remove(ax)
+            return filter(x[nonax]) * dd_filter(x[ax])
+        def ddf_f_product(node1, node2):
+            """
+                approximate dot product of functions
+            """
+            c1 = np.array(node1['center'])
+            c2 = np.array(node2['center'])
+            return -6. * filter(c2-c1) + np.sum([dxxf(c2-c1, i) for i in range(3)])
+        from scipy import sparse as sp
+        import scipy.sparse.linalg as splna
+        for id, node in enumerate(nodes):
+            node['id'] = id
+        def get_laplacian_matrix():
+            # construct a sparse matrix
+            data = list()
+            rows = list()
+            cols = list()
+
+            def add_to_list(n1, n2):
+                data.append(ddf_f_product(n1, n2))
+                rows.append(n1['id'])
+                cols.append(n2['id'])
+
+            def compute_dot_product():
+                def f(node, neighbours):
+                    add_to_list(node, node)
+                    for neighbour in neighbours:
+                        add_to_list(node, neighbour)
+                f.name = 'laplacian computation'
+                return f
+            op_executor(compute_dot_product())
+            return sp.coo_matrix((data, (rows, cols)), shape=(len(nodes), len(nodes))).tocsr()
+
+        L = get_laplacian_matrix()
+
+        print('solving Poisson equation...')
+        chis = splna.spsolve(L, v)
+        for chi, node in zip(chis, nodes):
+            node['chi'] = chi
+
+        print('computing the mean of chi...')
+        total_chi = 0.
+        for point in tqdm(points):
+            for sur, tril in zip(*sur_and_tril(point)):
+                total_chi += tril * sur['chi']
+        mean_chi = total_chi / points.shape[0]
+
+        print('mean_chi', mean_chi)
+        volumes = np.zeros(shape=(2**depth,)*3)
+
+        return octree_fields()
+
     return reconstructor
 
 if __name__ == '__main__':

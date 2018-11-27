@@ -13,15 +13,18 @@ outdir = os.path.join(root, output_dir)
 
 
 inpfile = 'bunny_normals'
-outsufx = 'test'
+outsufx = 'last_test'
 sufx = '.ply'
 
 inppath = os.path.join(inpdir, inpfile + sufx)
 outpath = os.path.join(outdir, '_'.join([inpfile, outsufx]) + sufx)
 
-####
+#############################
+# algorithm hyperparameters #
+#############################
 
 octdepth = 3
+divtempt = 1.
 
 def test():
     print(os.path.dirname(os.path.abspath(__file__)))

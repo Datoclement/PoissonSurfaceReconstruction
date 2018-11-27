@@ -11,8 +11,9 @@ if __name__ == '__main__':
     points = np.vstack((data['x'], data['y'], data['z'])).T
     normals = np.vstack((data['nx'], data['ny'], data['nz'])).T
 
-    print(points.shape)
-    print(normals.shape)
-    node_locs, node_grads = poisson_surface_reconstruction(config.octdepth)(points, normals)
+    print('num of points',points.shape[0])
+    node_vals = poisson_surface_reconstruction(
+            config.octdepth,
+            config.divtempt)(points, normals)
 
-    write_ply(config.outpath, (node_locs, node_grads), ['x', 'y', 'z', 'nx', 'ny', 'nz'])
+    write_ply(config.outpath, list(node_vals.values()), list(node_vals.keys()))
